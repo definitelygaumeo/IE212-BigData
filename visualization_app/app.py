@@ -6,8 +6,6 @@ from dash import dcc, html, Input, Output
 import plotly.express as px
 import plotly.graph_objects as go
 import pandas as pd
-import pymongo
-
 # Thêm thư mục cha vào sys.path
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_dir = os.path.dirname(current_dir)
@@ -41,13 +39,9 @@ def get_data_from_csv():
     data_path = os.path.join(project_dir, "data_raw", "CVD_cleaned.csv")
     return pd.read_csv(data_path)
 
-# Try to get data from MongoDB, fallback to CSV
-try:
-    df = get_data_from_mongodb()
-    data_source = "MongoDB"
-except:
-    df = get_data_from_csv()
-    data_source = "CSV"
+# Only use CSV data
+df = get_data_from_csv()
+data_source = "CSV"
 
 # Layout
 app.layout = html.Div([
@@ -185,4 +179,7 @@ def update_graphs(selected_ages, selected_sexes, selected_health):
 
 # Run the app
 if __name__ == "__main__":
-    app.run_server(debug=True)
+    try:
+        app.run(debug=True)  # Phương thức mới (Dash >= 2.0)
+    except AttributeError:
+        app.run_server(debug=True)  # Phương thức cũ (Dash < 2.0)
