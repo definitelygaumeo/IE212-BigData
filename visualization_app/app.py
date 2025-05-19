@@ -1,4 +1,3 @@
-# CVD_Prediction_System/visualization_app/app.py
 import os
 import sys
 import dash
@@ -6,6 +5,10 @@ from dash import dcc, html, Input, Output
 import plotly.express as px
 import plotly.graph_objects as go
 import pandas as pd
+import json
+from kafka import KafkaConsumer
+import time
+
 # Thêm thư mục cha vào sys.path
 current_dir = os.path.dirname(os.path.abspath(__file__))
 project_dir = os.path.dirname(current_dir)
@@ -14,22 +17,29 @@ sys.path.insert(0, project_dir)
 # Initialize the Dash app
 app = dash.Dash(__name__, title="CVD Prediction Dashboard")
 
-# Connect to MongoDB
-def get_data_from_mongodb(collection_name="predictions", limit=1000):
-    client = pymongo.MongoClient("mongodb://localhost:27017/")
-    db = client["cvd_db"]
-    collection = db[collection_name]
+# Hàm lấy dữ liệu từ Kafka
+def get_kafka_data(timeout=1000):
+    data_list = []
+    try:
+        consumer = KafkaConsumer(
+            'cvd_topic',
+            bootstrap_servers=['localhost:9092'],
+            auto_offset_reset='latest',
+            consumer_timeout_ms=timeout,  # Timeout sau 1 giây
+            value_deserializer=lambda x: json.loads(x.decode('utf-8')),
+            group_id='dashboard-consumer'
+        )
+        
+        start_time = time.time()
+        while time.time() - start_time < timeout/1000:
+            for message in consumer:
+                data_list.append(message.value)
+            time.sleep(0.1)
+    except Exception as e:
+        print(f"Error connecting to Kafka: {e}")
     
-    # Get the data
-    cursor = collection.find().limit(limit)
-    data = list(cursor)
-    
-    # Convert to DataFrame
-    df = pd.DataFrame(data)
-    
-    return df
+    return data_list
 
-# Fallback to CSV if MongoDB is not available
 def get_data_from_csv():
     data_path = os.path.join(project_dir, "data_result", "predictions.csv")
     if os.path.exists(data_path):
@@ -39,14 +49,21 @@ def get_data_from_csv():
     data_path = os.path.join(project_dir, "data_raw", "CVD_cleaned.csv")
     return pd.read_csv(data_path)
 
-# Only use CSV data
+# Khởi tạo dữ liệu từ CSV
 df = get_data_from_csv()
-data_source = "CSV"
+data_source = "CSV + Kafka (Real-time)"
 
 # Layout
 app.layout = html.Div([
     html.H1("CVD Prediction Dashboard", style={"textAlign": "center"}),
     html.H4(f"Data source: {data_source}", style={"textAlign": "center"}),
+    
+    # Thêm interval component để tự động cập nhật
+    dcc.Interval(
+        id='interval-component',
+        interval=5*1000,  # Cập nhật mỗi 5 giây
+        n_intervals=0
+    ),
     
     html.Div([
         html.Div([
@@ -71,7 +88,13 @@ app.layout = html.Div([
                 options=[{"label": health, "value": health} for health in df["General_Health"].unique()],
                 value=[],
                 multi=True
-            )
+            ),
+            
+            # Thêm thông tin streaming
+            html.Div([
+                html.H4("Live Streaming Data", style={"marginTop": "20px"}),
+                html.P(id="streaming-info", children="Waiting for data...")
+            ])
         ], style={"width": "25%", "padding": "20px", "backgroundColor": "#f8f9fa", "borderRadius": "10px"}),
         
         html.Div([
@@ -90,22 +113,53 @@ app.layout = html.Div([
                     html.Div([
                         dcc.Graph(id="risk-factors")
                     ])
+                ]),
+                # Thêm tab mới cho dữ liệu streaming
+                dcc.Tab(label="Live Stream", children=[
+                    html.Div([
+                        dcc.Graph(id="live-stream-graph")
+                    ])
                 ])
             ])
         ], style={"width": "75%", "padding": "20px"})
     ], style={"display": "flex", "flexDirection": "row"})
 ])
 
-# Callbacks
+# Callback để cập nhật thông tin streaming
+@app.callback(
+    Output("streaming-info", "children"),
+    [Input("interval-component", "n_intervals")]
+)
+def update_streaming_info(n):
+    return f"Last update: {time.strftime('%H:%M:%S')}"
+
+# Callback chính
 @app.callback(
     [Output("heart-disease-distribution", "figure"),
      Output("bmi-age-analysis", "figure"),
-     Output("risk-factors", "figure")],
+     Output("risk-factors", "figure"),
+     Output("live-stream-graph", "figure")],
     [Input("age-filter", "value"),
      Input("sex-filter", "value"),
-     Input("health-filter", "value")]
+     Input("health-filter", "value"),
+     Input("interval-component", "n_intervals")]  # Thêm interval trigger
 )
-def update_graphs(selected_ages, selected_sexes, selected_health):
+def update_graphs(selected_ages, selected_sexes, selected_health, n_intervals):
+    # Lấy dữ liệu từ Kafka và kết hợp với dữ liệu CSV
+    new_data = get_kafka_data()
+    
+    # Kết hợp dữ liệu
+    global df
+    if new_data:
+        try:
+            new_df = pd.DataFrame(new_data)
+            # Đảm bảo có các cột cần thiết
+            if 'Age_Category' in new_df.columns and 'Sex' in new_df.columns and 'General_Health' in new_df.columns:
+                df = pd.concat([df, new_df], ignore_index=True)
+                print(f"Added {len(new_df)} new records from Kafka")
+        except Exception as e:
+            print(f"Error processing Kafka data: {e}")
+    
     # Filter the data
     filtered_df = df.copy()
     
@@ -175,11 +229,25 @@ def update_graphs(selected_ages, selected_sexes, selected_health):
         title="Risk Factors by Heart Disease Status"
     )
     
-    return fig1, fig2, fig3
+    # Live Stream Graph - chỉ hiển thị 50 bản ghi mới nhất
+    latest_records = filtered_df.tail(50)
+    
+    fig4 = px.scatter(
+        latest_records,
+        x="BMI", 
+        y="Blood_Pressure_Systolic",
+        color="Heart_Disease",
+        size="Age",
+        hover_data=["General_Health", "Sex"],
+        title="Live Data Stream (Last 50 Records)",
+        labels={"BMI": "Body Mass Index", "Blood_Pressure_Systolic": "Systolic BP"}
+    )
+    
+    return fig1, fig2, fig3, fig4
 
 # Run the app
 if __name__ == "__main__":
     try:
-        app.run(debug=True)  # Phương thức mới (Dash >= 2.0)
+        app.run(debug=True)  # Phương thức mới (Dash >= 2.0) 
     except AttributeError:
         app.run_server(debug=True)  # Phương thức cũ (Dash < 2.0)
