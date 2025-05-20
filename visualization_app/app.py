@@ -234,13 +234,13 @@ def update_graphs(selected_ages, selected_sexes, selected_health, n_intervals):
     
     fig4 = px.scatter(
         latest_records,
-        x="BMI", 
-        y="Blood_Pressure_Systolic",
+        x="BMI",
+        y="Alcohol_Consumption",
         color="Heart_Disease",
-        size="Age",
         hover_data=["General_Health", "Sex"],
         title="Live Data Stream (Last 50 Records)",
-        labels={"BMI": "Body Mass Index", "Blood_Pressure_Systolic": "Systolic BP"}
+        labels={"BMI": "Body Mass Index",
+                "Alcohol_Consumption": "Alcohol Consumption"}
     )
     
     return fig1, fig2, fig3, fig4
