@@ -53,6 +53,41 @@ def get_data_from_csv():
 df = get_data_from_csv()
 data_source = "CSV + Kafka (Real-time)"
 
+def has_col(col):
+    return col in df.columns
+
+# -------------------- 1) XÁC ĐỊNH CÁC CỘT PHÂN LOẠI --------------------
+CATEGORICAL_COLS = [
+    "Age_Category", "Sex", "General_Health",          # đang dùng
+    "Smoking_History", "Exercise",
+    "Skin_Cancer", "Other_Cancer", "Depression",
+    "Diabetes", "Arthritis"
+]
+cat_cols_present = [c for c in CATEGORICAL_COLS if c in df.columns]
+
+# -------------------- 2) TẠO DROPDOWN ĐỘNG ------------------------------
+dropdown_components = []
+for col in cat_cols_present:
+    dropdown_components.extend([
+        html.Label(col.replace("_", " ")),
+        dcc.Dropdown(
+            id=f"{col}-filter",
+            options=[{"label": v, "value": v} for v in df[col].unique()],
+            value=[], multi=True
+        )
+    ])
+
+# -------------------- 3) THAY phần Filters trong layout ------------------
+filters_card = html.Div(
+    [html.H3("Filters")] + dropdown_components +
+    [html.Div([
+        html.H4("Live Streaming Data", style={"marginTop": "20px"}),
+        html.P(id="streaming-info", children="Waiting for data...")
+    ])],
+    style={"width": "25%", "padding": "20px",
+           "backgroundColor": "#f8f9fa", "borderRadius": "10px"}
+)
+
 # Layout
 app.layout = html.Div([
     html.H1("CVD Prediction Dashboard", style={"textAlign": "center"}),
@@ -66,36 +101,7 @@ app.layout = html.Div([
     ),
     
     html.Div([
-        html.Div([
-            html.H3("Filters"),
-            html.Label("Age Category"),
-            dcc.Dropdown(
-                id="age-filter",
-                options=[{"label": age, "value": age} for age in df["Age_Category"].unique()],
-                value=[],
-                multi=True
-            ),
-            html.Label("Sex"),
-            dcc.Dropdown(
-                id="sex-filter",
-                options=[{"label": sex, "value": sex} for sex in df["Sex"].unique()],
-                value=[],
-                multi=True
-            ),
-            html.Label("Health Status"),
-            dcc.Dropdown(
-                id="health-filter",
-                options=[{"label": health, "value": health} for health in df["General_Health"].unique()],
-                value=[],
-                multi=True
-            ),
-            
-            # Thêm thông tin streaming
-            html.Div([
-                html.H4("Live Streaming Data", style={"marginTop": "20px"}),
-                html.P(id="streaming-info", children="Waiting for data...")
-            ])
-        ], style={"width": "25%", "padding": "20px", "backgroundColor": "#f8f9fa", "borderRadius": "10px"}),
+        filters_card,
         
         html.Div([
             dcc.Tabs([
@@ -133,116 +139,83 @@ app.layout = html.Div([
 def update_streaming_info(n):
     return f"Last update: {time.strftime('%H:%M:%S')}"
 
+# -------------------- 4) TẠO DANH SÁCH Input ĐỘNG ------------------------
+dynamic_inputs = [Input(f"{c}-filter", "value") for c in cat_cols_present]
+
 # Callback chính
 @app.callback(
     [Output("heart-disease-distribution", "figure"),
      Output("bmi-age-analysis", "figure"),
      Output("risk-factors", "figure"),
      Output("live-stream-graph", "figure")],
-    [Input("age-filter", "value"),
-     Input("sex-filter", "value"),
-     Input("health-filter", "value"),
-     Input("interval-component", "n_intervals")]  # Thêm interval trigger
+    dynamic_inputs + [Input("interval-component", "n_intervals")]
 )
-def update_graphs(selected_ages, selected_sexes, selected_health, n_intervals):
-    # Lấy dữ liệu từ Kafka và kết hợp với dữ liệu CSV
-    new_data = get_kafka_data()
-    
-    # Kết hợp dữ liệu
+def update_graphs(*args):
+    # cuối cùng trong *args là n_intervals
+    n_intervals = args[-1]
+    filter_values = args[:-1]                # các giá trị dropdown
+
+    # 1. Nhận thêm record Kafka rồi dán vào df (giống trước) ----------------
+    new_records = get_kafka_data()
     global df
-    if new_data:
+    if new_records:
         try:
-            new_df = pd.DataFrame(new_data)
-            # Đảm bảo có các cột cần thiết
-            if 'Age_Category' in new_df.columns and 'Sex' in new_df.columns and 'General_Health' in new_df.columns:
-                df = pd.concat([df, new_df], ignore_index=True)
-                print(f"Added {len(new_df)} new records from Kafka")
+            df = pd.concat([df, pd.DataFrame(new_records)], ignore_index=True)
         except Exception as e:
-            print(f"Error processing Kafka data: {e}")
-    
-    # Filter the data
-    filtered_df = df.copy()
-    
-    if selected_ages:
-        filtered_df = filtered_df[filtered_df["Age_Category"].isin(selected_ages)]
-    
-    if selected_sexes:
-        filtered_df = filtered_df[filtered_df["Sex"].isin(selected_sexes)]
-    
-    if selected_health:
-        filtered_df = filtered_df[filtered_df["General_Health"].isin(selected_health)]
-    
-    # Heart Disease Distribution
-    heart_disease_counts = filtered_df["Heart_Disease"].value_counts().reset_index()
-    heart_disease_counts.columns = ["Heart_Disease", "Count"]
-    
-    fig1 = px.pie(
-        heart_disease_counts, 
-        names="Heart_Disease", 
-        values="Count",
-        title="Heart Disease Distribution",
-        color_discrete_sequence=px.colors.qualitative.Safe
-    )
-    
-    # BMI by Age Category and Heart Disease
-    fig2 = px.box(
-        filtered_df,
-        x="Age_Category",
-        y="BMI",
-        color="Heart_Disease",
-        title="BMI by Age Category and Heart Disease",
-        color_discrete_sequence=px.colors.qualitative.Safe
-    )
-    
-    # Risk Factors (smoking, alcohol, exercise)
-    risk_factors = filtered_df.groupby("Heart_Disease").agg({
-        "Smoking_History": lambda x: (x == "Yes").mean() * 100,
-        "Alcohol_Consumption": "mean",
-        "Exercise": lambda x: (x == "Yes").mean() * 100
-    }).reset_index()
-    
+            print("Kafka error:", e)
+
+    # 2. Lọc theo tất cả dropdown hiện có -----------------------------------
+    filtered = df.copy()
+    for col, selected in zip(cat_cols_present, filter_values):
+        if selected:
+            filtered = filtered[filtered[col].isin(selected)]
+
+    # ---- Các biểu đồ (giữ nguyên logic cũ, chỉ đổi biến nguồn) -----------
+    heart_counts = filtered["Heart_Disease"].value_counts().reset_index()
+    heart_counts.columns = ["Heart_Disease", "Count"]
+    fig1 = px.pie(heart_counts, names="Heart_Disease", values="Count",
+                  title="Heart Disease Distribution")
+
+    fig2 = px.box(filtered, x="Age_Category", y="BMI", color="Heart_Disease",
+                  title="BMI by Age Category and Heart Disease")
+
+    # ---- xác định cột số hiện diện ---------
+    numeric_cols = [
+        ("Smoking_History", lambda x: (x == "Yes").mean()*100),
+        ("Alcohol_Consumption", "mean"),
+        ("Exercise", lambda x: (x == "Yes").mean()*100),
+        ("Fruit_Consumption", "mean"),
+        ("Green_Vegetables_Consumption", "mean"),
+        ("FriedPotato_Consumption", "mean")
+    ]
+
+    agg_dict = {col: func for col, func in numeric_cols if col in filtered.columns}
+
+    risk_factors = filtered.groupby("Heart_Disease").agg(agg_dict).reset_index()
+
     fig3 = go.Figure()
-    
-    fig3.add_trace(go.Bar(
-        x=risk_factors["Heart_Disease"],
-        y=risk_factors["Smoking_History"],
-        name="Smoking History (%)",
-        marker_color='indianred'
-    ))
-    
-    fig3.add_trace(go.Bar(
-        x=risk_factors["Heart_Disease"],
-        y=risk_factors["Alcohol_Consumption"],
-        name="Alcohol Consumption (avg)",
-        marker_color='lightsalmon'
-    ))
-    
-    fig3.add_trace(go.Bar(
-        x=risk_factors["Heart_Disease"],
-        y=risk_factors["Exercise"],
-        name="Exercise (%)",
-        marker_color='lightgreen'
-    ))
-    
-    fig3.update_layout(
-        barmode='group',
-        title="Risk Factors by Heart Disease Status"
-    )
-    
-    # Live Stream Graph - chỉ hiển thị 50 bản ghi mới nhất
-    latest_records = filtered_df.tail(50)
-    
-    fig4 = px.scatter(
-        latest_records,
-        x="BMI",
-        y="Alcohol_Consumption",
-        color="Heart_Disease",
-        hover_data=["General_Health", "Sex"],
-        title="Live Data Stream (Last 50 Records)",
-        labels={"BMI": "Body Mass Index",
-                "Alcohol_Consumption": "Alcohol Consumption"}
-    )
-    
+    for col, color in [
+        ("Smoking_History",  "indianred"),
+        ("Alcohol_Consumption","lightsalmon"),
+        ("Exercise","lightgreen"),
+        ("Fruit_Consumption","royalblue"),
+        ("Green_Vegetables_Consumption","darkgreen"),
+        ("FriedPotato_Consumption","gold")
+    ]:
+        if col in risk_factors:
+            fig3.add_trace(go.Bar(
+                x=risk_factors["Heart_Disease"], y=risk_factors[col],
+                name=col.replace("_", " "), marker_color=color))
+
+    fig3.update_layout(barmode="group",
+                       title="Risk Factors by Heart Disease Status")
+
+    latest = filtered.tail(50)
+    fig4 = px.scatter(latest, x="BMI", y="Alcohol_Consumption",
+                      color="Heart_Disease",
+                      hover_data=["General_Health","Sex"],
+                      title="Live Data Stream (Last 50 Records)")
+
     return fig1, fig2, fig3, fig4
 
 # Run the app
