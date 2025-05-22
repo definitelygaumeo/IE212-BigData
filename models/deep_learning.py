@@ -4,6 +4,7 @@ from tensorflow import keras
 from tensorflow.keras import layers
 from sklearn.model_selection import train_test_split
 import numpy as np
+from sklearn.metrics import f1_score, precision_score, recall_score, roc_auc_score
 
 def create_deep_model(input_shape):
     """
@@ -37,10 +38,19 @@ def train_deep_learning(X, y, test_size=0.2, random_state=42, epochs=10, batch_s
     )
     
     loss, accuracy = model.evaluate(X_test, y_test)
-    
+    y_pred_prob = model.predict(X_test).ravel()
+    y_pred = (y_pred_prob > 0.5).astype(int)
+    auc = roc_auc_score(y_test, y_pred_prob)
+    f1 = f1_score(y_test, y_pred)
+    precision = precision_score(y_test, y_pred)
+    recall = recall_score(y_test, y_pred)
     metrics = {
         "loss": loss,
-        "accuracy": accuracy
+        "accuracy": accuracy,
+        "auc": auc,
+        "f1": f1,
+        "precision": precision,
+        "recall": recall
     }
     
     return model, history, metrics, (X_test, y_test)
